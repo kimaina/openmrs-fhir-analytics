@@ -1,0 +1,189 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+ Copyright 2020 Google LLC
+
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+ You may obtain a copy of the License at
+
+      http://www.apache.org/licenses/LICENSE-2.0
+
+ Unless required by applicable law or agreed to in writing, software
+ distributed under the License is distributed on an "AS IS" BASIS,
+ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ See the License for the specific language governing permissions and
+ limitations under the License.
+-->
+
+
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>org.openmrs.analytics</groupId>
+    <artifactId>fhir</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+  </parent>
+
+  <artifactId>fhir-binlog-streaming-etl</artifactId>
+  <properties>
+    <!--Default settings used during development for IDE debugging capabilities-->
+    <database.hostname>localhost</database.hostname>
+    <database.port>3306</database.port>
+    <database.user>root</database.user>
+    <database.password>debezium</database.password>
+    <database.whitelist>openmrs</database.whitelist>
+    <database.dbname>mysql</database.dbname>
+    <table.whitelist>openmrs.obs,openmrs.encounter</table.whitelist>
+
+    <mysql.init.timeout>300000</mysql.init.timeout>
+    <version.debezium>1.2.1.Final</version.debezium>
+    <version.debezium.tag>1.2</version.debezium.tag>
+    <version.jackson>2.10.0</version.jackson>
+    <version.plugin.docker>0.24.0</version.plugin.docker>
+  </properties>
+
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>io.debezium</groupId>
+        <artifactId>debezium-embedded</artifactId>
+        <version>${version.debezium}</version>
+      </dependency>
+      <dependency>
+        <groupId>io.debezium</groupId>
+        <artifactId>debezium-connector-mysql</artifactId>
+        <version>${version.debezium}</version>
+      </dependency>
+
+      <!-- Align Jackson dependencies between Debezium and Kinesis client -->
+      <dependency>
+        <groupId>com.fasterxml.jackson.dataformat</groupId>
+        <artifactId>jackson-dataformat-cbor</artifactId>
+        <version>${version.jackson}</version>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+  <dependencies>
+    <dependency>
+      <groupId>${project.parent.groupId}</groupId>
+      <artifactId>fhir-common</artifactId>
+      <version>${project.parent.version}</version>
+    </dependency>
+
+    <!-- OpenMRS libraries -->
+    <dependency>
+      <groupId>io.debezium</groupId>
+      <artifactId>debezium-embedded</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.debezium</groupId>
+      <artifactId>debezium-connector-mysql</artifactId>
+    </dependency>
+
+  </dependencies>
+
+  <build>
+    <pluginManagement><!-- lock down plugins versions to avoid using Maven defaults (may be moved to parent pom) -->
+      <plugins>
+        <!-- clean lifecycle, see https://maven.apache.org/ref/current/maven-core/lifecycles.html#clean_Lifecycle -->
+        <plugin>
+          <artifactId>maven-clean-plugin</artifactId>
+          <version>3.1.0</version>
+        </plugin>
+        <!-- default lifecycle, jar packaging: see https://maven.apache.org/ref/current/maven-core/default-bindings.html#Plugin_bindings_for_jar_packaging -->
+        <plugin>
+          <artifactId>maven-resources-plugin</artifactId>
+          <version>3.0.2</version>
+        </plugin>
+        <plugin>
+          <artifactId>maven-compiler-plugin</artifactId>
+          <version>3.8.0</version>
+        </plugin>
+        <plugin>
+          <artifactId>maven-surefire-plugin</artifactId>
+          <version>2.22.1</version>
+        </plugin>
+        <plugin>
+          <artifactId>maven-jar-plugin</artifactId>
+          <version>3.0.2</version>
+        </plugin>
+        <plugin>
+          <artifactId>maven-install-plugin</artifactId>
+          <version>2.5.2</version>
+        </plugin>
+        <plugin>
+          <artifactId>maven-deploy-plugin</artifactId>
+          <version>2.8.2</version>
+        </plugin>
+        <!-- site lifecycle, see https://maven.apache.org/ref/current/maven-core/lifecycles.html#site_Lifecycle -->
+        <plugin>
+          <artifactId>maven-site-plugin</artifactId>
+          <version>3.7.1</version>
+        </plugin>
+        <plugin>
+          <artifactId>maven-project-info-reports-plugin</artifactId>
+          <version>3.0.0</version>
+        </plugin>
+        <plugin>
+          <groupId>org.codehaus.mojo</groupId>
+          <artifactId>exec-maven-plugin</artifactId>
+          <version>1.6.0</version>
+        </plugin>
+        <plugin>
+          <groupId>io.fabric8</groupId>
+          <artifactId>docker-maven-plugin</artifactId>
+          <version>${version.plugin.docker}</version>
+        </plugin>
+      </plugins>
+    </pluginManagement>
+    <plugins>
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>exec-maven-plugin</artifactId>
+        <configuration>
+          <mainClass>org.openmrs.analytics.FhirStreaming</mainClass>
+          <systemProperties>
+            <systemProperty>
+              <key>database.hostname</key>
+              <value>${database.hostname}</value>
+            </systemProperty>
+            <systemProperty>
+              <key>database.port</key>
+              <value>${database.port}</value>
+            </systemProperty>
+            <systemProperty>
+              <key>database.user</key>
+              <value>${database.user}</value>
+            </systemProperty>
+            <systemProperty>
+              <key>database.password</key>
+              <value>${database.password}</value>
+            </systemProperty>
+            <systemProperty>
+              <key>database.whitelist</key>
+              <value>${database.whitelist}</value>
+            </systemProperty>
+            <systemProperty>
+              <key>database.dbname</key>
+              <value>${database.dbname}</value>
+            </systemProperty>
+            <systemProperty>
+              <key>table.whitelist</key>
+              <value>${table.whitelist}</value>
+            </systemProperty>
+          </systemProperties>
+        </configuration>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <configuration>
+          <source>8</source>
+          <target>8</target>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+</project>
