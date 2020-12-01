@@ -14,8 +14,11 @@
 
 package org.openmrs.analytics;
 
+import java.beans.PropertyVetoException;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -27,6 +30,7 @@ import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.coders.AvroCoder;
 import org.apache.beam.sdk.coders.CannotProvideCoderException;
 import org.apache.beam.sdk.io.FileIO;
+import org.apache.beam.sdk.io.jdbc.JdbcIO;
 import org.apache.beam.sdk.io.parquet.ParquetIO;
 import org.apache.beam.sdk.options.Default;
 import org.apache.beam.sdk.options.Description;
@@ -36,6 +40,7 @@ import org.apache.beam.sdk.options.Validation.Required;
 import org.apache.beam.sdk.transforms.Create;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.ParDo;
+import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
 import org.hl7.fhir.dstu3.model.Bundle;
 import org.slf4j.Logger;
@@ -58,6 +63,7 @@ public class FhirEtl {
 		 */
 		@Description("OpenMRS server URL")
 		@Required
+		@Default.String("http://localhost:8099/openmrs")
 		String getServerUrl();
 		
 		void setServerUrl(String value);
@@ -70,14 +76,15 @@ public class FhirEtl {
 		
 		@Description("Comma separated list of resource and search parameters to fetch; in its simplest "
 		        + "form this is a list of resources, e.g., `Patient,Encounter,Observation` but more "
-		        + "complex search paths are possible too, e.g., `Patient?name=Susan`.")
+		        + "complex search paths are possible too, e.g., `Patient?name=Susan.`"
+		        + "Please note that complex search params doesn't work when JDBC mode is enabled.")
 		@Default.String("Patient,Encounter,Observation")
 		String getSearchList();
 		
 		void setSearchList(String value);
 		
 		@Description("The number of resources to be fetched in one API call.")
-		@Default.Integer(10)
+		@Default.Integer(50)
 		int getBatchSize();
 		
 		void setBatchSize(int value);
@@ -101,6 +108,7 @@ public class FhirEtl {
 		        + "`projects/[\\w-]+/locations/[\\w-]+/datasets/[\\w-]+/fhirStores/[\\w-]+`, e.g., "
 		        + "`projects/my-project/locations/us-central1/datasets/openmrs_fhir_test/fhirStores/test`")
 		@Required
+		@Default.String("projects/my-project/locations/us-central1/datasets/openmrs_fhir_test/fhirStores/test")
 		String getSinkPath();
 		
 		void setSinkPath(String value);
@@ -118,10 +126,56 @@ public class FhirEtl {
 		void setSinkPassword(String value);
 		
 		@Description("The base name for output Parquet file; for each resource, one fileset will be created.")
-		@Default.String("")
+		@Default.String("/tmp/TEST/")
 		String getOutputParquetBase();
 		
 		void setOutputParquetBase(String value);
+		
+		/**
+		 * JDBC DB settings: defaults values have been pointed to ./openmrs-compose.yaml
+		 */
+		
+		@Description("JDBC URL input")
+		@Default.String("jdbc:mysql://localhost:3306/openmrs")
+		String getJdbcUrl();
+		
+		void setJdbcUrl(String value);
+		
+		@Description("JDBC MySQL driver class")
+		@Default.String("com.mysql.cj.jdbc.Driver")
+		String getJdbcDriverClass();
+		
+		void setJdbcDriverClass(String value);
+		
+		@Description("The number of resources to be fetched in one API call.")
+		@Default.Integer(70)
+		int getJdbcMaxPoolSize();
+		
+		void setJdbcMaxPoolSize(int value);
+		
+		@Description("MySQL DB user")
+		@Default.String("root")
+		String getDbUser();
+		
+		void setDbUser(String value);
+		
+		@Description("MySQL DB user password")
+		@Default.String("debezium")
+		String getDbPassword();
+		
+		void setDbPassword(String value);
+		
+		@Description("Path to Table-FHIR map config")
+		@Default.String("utils/dbz_event_to_fhir_config.json")
+		String getTableFhirMapPath();
+		
+		void setTableFhirMapPath(String value);
+		
+		@Description("Flag to switch between the 2 modes of batch extract")
+		@Default.Boolean(false)
+		Boolean isJdbcModeEnabled();
+		
+		void setJdbcModeEnabled(Boolean value);
 	}
 	
 	static FhirSearchUtil createFhirSearchUtil(FhirEtlOptions options, FhirContext fhirContext) {
@@ -258,7 +312,35 @@ public class FhirEtl {
 		p.run().waitUntilFinish();
 	}
 	
-	public static void main(String[] args) throws CannotProvideCoderException {
+	static void runFhirJdbcFetch(FhirEtlOptions options, FhirContext fhirContext) throws PropertyVetoException, IOException {
+		Pipeline p = Pipeline.create(options);
+		JdbcFhirMode jdbcUtil = new JdbcFhirMode();
+		JdbcIO.DataSourceConfiguration jdbcConfig = jdbcUtil.getJdbcConfig(options);
+		int batchSize = options.getBatchSize();
+		ParquetUtil parquetUtil = new ParquetUtil(fhirContext, options.getOutputParquetBase());
+		LinkedHashMap<String, String> reversHashMap = jdbcUtil.createFhirReverseMap(options);
+		// process each table-resource mappings
+		for (Map.Entry<String, String> entry : reversHashMap.entrySet()) {
+			String tableName = entry.getKey();
+			String resourceType = entry.getValue();
+			Schema schema = parquetUtil.getResourceSchema(resourceType);
+			// generate fetching ranges i.e 1 to 1000, 1001 to 2001, depending with batchSize
+			PCollection<KV<String, Iterable<Integer>>> ranges = JdbcFhirMode.createChunkRanges(tableName, batchSize, p,
+			    jdbcConfig);
+			// fetch FHIR resources and generate generic records
+			PCollection<GenericRecord> genericRecords = JdbcFhirMode
+			        .generateFhirUrl(tableName, resourceType, batchSize, ranges, jdbcConfig)
+			        .apply(ParDo.of(new JdbcFhirMode.FhirSink(options.getSinkPath(), options.getSinkUsername(),
+			                options.getSinkPassword(), options.getServerUrl() + options.getServerFhirEndpoint(),
+			                options.getOutputParquetBase(), options.getUsername(), options.getPassword())))
+			        .setCoder(AvroCoder.of(GenericRecord.class, schema));
+			
+		}
+		
+		p.run().waitUntilFinish();
+	}
+	
+	public static void main(String[] args) throws CannotProvideCoderException, PropertyVetoException, IOException {
 		// Todo: Autowire
 		FhirContext fhirContext = FhirContext.forDstu3();
 		
@@ -266,6 +348,9 @@ public class FhirEtl {
 		
 		ParquetUtil.initializeAvroConverters();
 		
-		runFhirFetch(options, fhirContext);
+		if (options.isJdbcModeEnabled())
+			runFhirJdbcFetch(options, fhirContext);
+		if (!options.isJdbcModeEnabled())
+			runFhirFetch(options, fhirContext);
 	}
 }
